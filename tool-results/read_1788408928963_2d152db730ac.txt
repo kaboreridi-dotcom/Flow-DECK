@@ -1,0 +1,1184 @@
+     1→"use client";
+     2→// Flow DECK — central store (zustand) with undo/redo, trash, import/export
+     3→import { create } from "zustand";
+     4→import type {
+     5→  AppData,
+     6→  Board,
+     7→  Column,
+     8→  Filters,
+     9→  Label,
+    10→  Priority,
+    11→  Recurrence,
+    12→  Snapshot,
+    13→  SortDir,
+    14→  SortKey,
+    15→  Subtask,
+    16→  Task,
+    17→  TrashItem,
+    18→  ViewMode,
+    19→} from "./types";
+    20→import { EMPTY_FILTERS } from "./types";
+    21→import {
+    22→  cloneTask,
+    23→  createBoard,
+    24→  createColumn,
+    25→  createLabel,
+    26→  createSubtask,
+    27→  createTask,
+    28→  uid,
+    29→} from "./factory";
+    30→import { loadData, saveData, detectBrowserLang } from "./storage";
+    31→import { emptyData, sanitizeAppData } from "./validation";
+    32→import { nextRecurrenceDate } from "./datetime";
+    33→import { messages, type Lang } from "@/lib/i18n/translations";
+    34→
+    35→export interface UIState {
+    36→  view: ViewMode;
+    37→  search: string;
+    38→  globalSearchOpen: boolean;
+    39→  sortKey: SortKey;
+    40→  sortDir: SortDir;
+    41→  filters: Filters;
+    42→  openTaskId: string | null;
+    43→  sidebarOpen: boolean;
+    44→  statsOpen: boolean;
+    45→  archiveOpen: boolean;
+    46→  trashOpen: boolean;
+    47→  templatesOpen: boolean;
+    48→  importExportOpen: boolean;
+    49→  shortcutsOpen: boolean;
+    50→  focusOpen: boolean;
+    51→  newTaskOpen: boolean;
+    52→  settingsOpen: boolean;
+    53→}
+    54→
+    55→export interface BoardStructureSpec {
+    56→  name: string;
+    57→  description?: string;
+    58→  columns: string[];
+    59→  labels?: { name: string; color: string }[];
+    60→  tasks?: { title: string; description?: string; columnIndex: number; priority?: Priority }[];
+    61→}
+    62→
+    63→export interface ImportSummary {
+    64→  added: number;
+    65→  replaced: number;
+    66→  skipped: number;
+    67→}
+    68→
+    69→interface AppStore {
+    70→  data: AppData;
+    71→  ui: UIState;
+    72→  hydrated: boolean;
+    73→  past: Snapshot[];
+    74→  future: Snapshot[];
+    75→  _batching: boolean;
+    76→  _batchSnapshot: Snapshot | null;
+    77→
+    78→  hydrate: () => void;
+    79→
+    80→  setUI: (patch: Partial<UIState>) => void;
+    81→  setSearch: (q: string) => void;
+    82→  setView: (v: ViewMode) => void;
+    83→  setSort: (key: SortKey, dir?: SortDir) => void;
+    84→  toggleSortDir: () => void;
+    85→  setFilters: (patch: Partial<Filters>) => void;
+    86→  resetFilters: () => void;
+    87→
+    88→  // boards
+    89→  createBoard: (opts?: { name?: string; description?: string; templateId?: string }) => string | null;
+    90→  createBoardWithStructure: (spec: BoardStructureSpec) => string;
+    91→  updateBoard: (id: string, patch: Partial<Pick<Board, "name" | "description">>) => void;
+    92→  duplicateBoard: (id: string) => void;
+    93→  deleteBoard: (id: string) => void;
+    94→  resetBoard: (id: string) => void;
+    95→  setActiveBoard: (id: string) => void;
+    96→  moveBoardTo: (id: string, toIndex: number) => void;
+    97→  archiveBoard: (id: string) => void;
+    98→  unarchiveBoard: (id: string) => void;
+    99→
+   100→  // columns
+   101→  addColumn: (boardId: string, name: string) => void;
+   102→  updateColumn: (id: string, patch: Partial<Pick<Column, "name" | "taskLimit">>) => void;
+   103→  deleteColumn: (id: string, mode: "move" | "archive" | "delete", targetColumnId?: string) => void;
+   104→  duplicateColumn: (id: string) => void;
+   105→  moveColumnTo: (id: string, toIndex: number) => void;
+   106→  archiveColumn: (id: string) => void;
+   107→  unarchiveColumn: (id: string) => void;
+   108→
+   109→  // tasks
+   110→  addTask: (input: {
+   111→    columnId: string;
+   112→    title: string;
+   113→    description?: string;
+   114→    dueDate?: number | null;
+   115→    priority?: Priority;
+   116→    labelIds?: string[];
+   117→    estimateMinutes?: number | null;
+   118→  }) => string | null;
+   119→  updateTask: (id: string, patch: Partial<Task>) => void;
+   120→  deleteTask: (id: string) => void;
+   121→  duplicateTask: (id: string) => void;
+   122→  archiveTask: (id: string) => void;
+   123→  unarchiveTask: (id: string) => void;
+   124→  moveTask: (taskId: string, toColumnId: string, toIndex: number) => void;
+   125→  toggleTaskDone: (id: string) => void;
+   126→  toggleTaskBlocked: (id: string) => void;
+   127→
+   128→  // subtasks
+   129→  addSubtask: (taskId: string, title: string) => void;
+   130→  updateSubtask: (taskId: string, subId: string, patch: Partial<Subtask>) => void;
+   131→  deleteSubtask: (taskId: string, subId: string) => void;
+   132→  moveSubtask: (taskId: string, subId: string, dir: -1 | 1) => void;
+   133→
+   134→  // comments & links
+   135→  addComment: (taskId: string, text: string) => void;
+   136→  deleteComment: (taskId: string, commentId: string) => void;
+   137→  addLink: (taskId: string, url: string) => void;
+   138→  deleteLink: (taskId: string, linkId: string) => void;
+   139→
+   140→  // timer
+   141→  startTimer: (taskId: string) => void;
+   142→  pauseTimer: (taskId: string) => void;
+   143→  logTimer: (taskId: string) => void;
+   144→  clearTimer: (taskId: string) => void;
+   145→
+   146→  // labels
+   147→  addLabel: (boardId: string, name: string, color: string) => string | null;
+   148→  updateLabel: (boardId: string, labelId: string, patch: Partial<Label>) => void;
+   149→  deleteLabel: (boardId: string, labelId: string) => void;
+   150→  toggleTaskLabel: (taskId: string, labelId: string) => void;
+   151→
+   152→  // recurrence
+   153→  setRecurrence: (taskId: string, recurrence: Recurrence | null) => void;
+   154→
+   155→  // trash
+   156→  restoreFromTrash: (itemId: string) => void;
+   157→  purgeTrashItem: (itemId: string) => void;
+   158→  emptyTrash: () => void;
+   159→
+   160→  // history
+   161→  undo: () => void;
+   162→  redo: () => void;
+   163→  beginBatch: () => void;
+   164→  commitBatch: () => void;
+   165→  cancelBatch: () => void;
+   166→
+   167→  // import
+   168→  importBoards: (payload: {
+   169→    boards: Board[];
+   170→    columns: Column[];
+   171→    tasks: Task[];
+   172→  }, mode: "replace" | "copy") => ImportSummary;
+   173→  replaceAllData: (data: AppData) => void;
+   174→}
+   175→
+   176→const MAX_HISTORY = 60;
+   177→
+   178→function snapshotOf(d: AppData): Snapshot {
+   179→  return {
+   180→    boards: d.boards,
+   181→    columns: d.columns,
+   182→    tasks: d.tasks,
+   183→    trash: d.trash,
+   184→    activeBoardId: d.activeBoardId,
+   185→  };
+   186→}
+   187→
+   188→function defaultColumnsFor(boardId: string, names: string[]): Column[] {
+   189→  return names.map((n, i) => createColumn(boardId, n, i));
+   190→}
+   191→
+   192→function seedWelcomeBoard(lang: Lang): AppData {
+   193→  const t = (k: string) => messages[lang][k] ?? k;
+   194→  const board = createBoard(t("seed.board.name"), t("seed.board.desc"), 0);
+   195→  const cols = defaultColumnsFor(board.id, [t("col.todo"), t("col.inprogress"), t("col.done")]);
+   196→  const welcome = createTask({
+   197→    boardId: board.id,
+   198→    columnId: cols[0].id,
+   199→    title: t("seed.task.title"),
+   200→    description: t("seed.task.desc"),
+   201→    priority: "normal",
+   202→  });
+   203→  const done1 = createTask({ boardId: board.id, columnId: cols[2].id, title: t("seed.task2.title") });
+   204→  done1.status = "done";
+   205→  done1.completedAt = Date.now();
+   206→  return {
+   207→    ...emptyData(),
+   208→    boards: [board],
+   209→    columns: cols,
+   210→    tasks: [welcome, done1],
+   211→    activeBoardId: board.id,
+   212→  };
+   213→}
+   214→
+   215→function nextOrder(tasks: Task[], columnId: string): number {
+   216→  return tasks.filter((t) => t.columnId === columnId).reduce((m, t) => Math.max(m, t.order + 1), 0);
+   217→}
+   218→
+   219→export function buildBoardExport(data: AppData, boardId: string) {
+   220→  const board = data.boards.find((b) => b.id === boardId);
+   221→  if (!board) return null;
+   222→  const columns = data.columns.filter((c) => c.boardId === boardId);
+   223→  const columnIds = new Set(columns.map((c) => c.id));
+   224→  const tasks = data.tasks.filter((t) => t.boardId === boardId && columnIds.has(t.columnId));
+   225→  return {
+   226→    app: "Flow DECK",
+   227→    type: "board",
+   228→    version: data.version,
+   229→    exportedAt: new Date().toISOString(),
+   230→    boards: [board],
+   231→    columns,
+   232→    tasks,
+   233→  };
+   234→}
+   235→
+   236→export function buildWorkspaceExport(data: AppData) {
+   237→  return {
+   238→    app: "Flow DECK",
+   239→    type: "workspace",
+   240→    version: data.version,
+   241→    exportedAt: new Date().toISOString(),
+   242→    boards: data.boards,
+   243→    columns: data.columns,
+   244→    tasks: data.tasks,
+   245→  };
+   246→}
+   247→
+   248→export const useAppStore = create<AppStore>((set, get) => {
+   249→  const pushHistory = () => {
+   250→    const s = get();
+   251→    if (s._batching) return;
+   252→    const snap = snapshotOf(s.data);
+   253→    set({ past: [...s.past.slice(-MAX_HISTORY + 1), snap], future: [] });
+   254→  };
+   255→
+   256→  const applyData = (mutator: (d: AppData) => AppData, touchBoards = false) => {
+   257→    const s = get();
+   258→    const now = Date.now();
+   259→    let d = mutator(s.data);
+   260→    if (touchBoards && d.activeBoardId) {
+   261→      d = {
+   262→        ...d,
+   263→        boards: d.boards.map((b) => (b.id === d.activeBoardId ? { ...b, updatedAt: now } : b)),
+   264→      };
+   265→    }
+   266→    set({ data: d });
+   267→    saveData(d);
+   268→  };
+   269→
+   270→  const withTask = (id: string, mutator: (t: Task) => Task, touch = true) => {
+   271→    applyData((d) => {
+   272→      const now = Date.now();
+   273→      return {
+   274→        ...d,
+   275→        tasks: d.tasks.map((t) => (t.id === id ? { ...mutator(t), updatedAt: touch ? now : t.updatedAt } : t)),
+   276→      };
+   277→    }, touch);
+   278→  };
+   279→
+   280→  return {
+   281→    data: emptyData(),
+   282→    ui: {
+   283→      view: "kanban",
+   284→      search: "",
+   285→      globalSearchOpen: false,
+   286→      sortKey: "manual",
+   287→      sortDir: "asc",
+   288→      filters: EMPTY_FILTERS,
+   289→      openTaskId: null,
+   290→      sidebarOpen: false,
+   291→      statsOpen: false,
+   292→      archiveOpen: false,
+   293→      trashOpen: false,
+   294→      templatesOpen: false,
+   295→      importExportOpen: false,
+   296→      shortcutsOpen: false,
+   297→      focusOpen: false,
+   298→      newTaskOpen: false,
+   299→      settingsOpen: false,
+   300→    },
+   301→    hydrated: false,
+   302→    past: [],
+   303→    future: [],
+   304→    _batching: false,
+   305→    _batchSnapshot: null,
+   306→
+   307→    hydrate: () => {
+   308→      if (get().hydrated) return;
+   309→      const { data, corrupted } = loadData();
+   310→      let d: AppData;
+   311→      if (data) {
+   312→        d = data;
+   313→      } else {
+   314→        const lang: Lang = detectBrowserLang();
+   315→        d = seedWelcomeBoard(lang);
+   316→        saveData(d, true);
+   317→      }
+   318→      set({
+   319→        data: d,
+   320→        hydrated: true,
+   321→        ui: {
+   322→          ...get().ui,
+   323→          view: d.prefs?.view ?? "kanban",
+   324→          sortKey: d.prefs?.sortKey ?? "manual",
+   325→          sortDir: d.prefs?.sortDir ?? "asc",
+   326→        },
+   327→      });
+   328→      if (corrupted) {
+   329→        window.dispatchEvent(new CustomEvent("flowdeck:corrupted"));
+   330→      }
+   331→    },
+   332→
+   333→    setUI: (patch) => {
+   334→      set({ ui: { ...get().ui, ...patch } });
+   335→      const ui = get().ui;
+   336→      if (patch.view || patch.sortKey || patch.sortDir) {
+   337→        const d = { ...get().data, prefs: { view: ui.view, sortKey: ui.sortKey, sortDir: ui.sortDir } };
+   338→        set({ data: d });
+   339→        saveData(d);
+   340→      }
+   341→    },
+   342→    setSearch: (q) => set({ ui: { ...get().ui, search: q } }),
+   343→    setView: (v) => get().setUI({ view: v }),
+   344→    setSort: (key, dir) =>
+   345→      get().setUI({ sortKey: key, sortDir: dir ?? get().ui.sortDir }),
+   346→    toggleSortDir: () => get().setUI({ sortDir: get().ui.sortDir === "asc" ? "desc" : "asc" }),
+   347→    setFilters: (patch) => set({ ui: { ...get().ui, filters: { ...get().ui.filters, ...patch } } }),
+   348→    resetFilters: () => set({ ui: { ...get().ui, filters: { ...EMPTY_FILTERS } } }),
+   349→
+   350→    // ---------- boards ----------
+   351→    createBoard: (opts) => {
+   352→      const lang: Lang = detectBrowserLang();
+   353→      const t = (k: string) => messages[lang][k] ?? k;
+   354→      const name = opts?.name?.trim() || t("board.new");
+   355→      const board = createBoard(name, opts?.description ?? "", get().data.boards.length);
+   356→      const cols = defaultColumnsFor(board.id, [t("col.todo"), t("col.inprogress"), t("col.done")]);
+   357→      pushHistory();
+   358→      applyData((d) => ({
+   359→        ...d,
+   360→        boards: [...d.boards, board],
+   361→        columns: [...d.columns, ...cols],
+   362→        activeBoardId: board.id,
+   363→      }));
+   364→      return board.id;
+   365→    },
+   366→
+   367→    createBoardWithStructure: (spec) => {
+   368→      const board = createBoard(spec.name, spec.description ?? "", get().data.boards.length);
+   369→      const cols = spec.columns.map((n, i) => createColumn(board.id, n, i));
+   370→      const labels: Label[] = (spec.labels ?? []).map((l) => createLabel(l.name, l.color));
+   371→      board.labels = labels;
+   372→      const orderCounter = new Map<string, number>();
+   373→      const tasks: Task[] = (spec.tasks ?? []).map((spec2) => {
+   374→        const col = cols[Math.min(Math.max(0, spec2.columnIndex), cols.length - 1)];
+   375→        const order = orderCounter.get(col.id) ?? 0;
+   376→        orderCounter.set(col.id, order + 1);
+   377→        return createTask({
+   378→          boardId: board.id,
+   379→          columnId: col.id,
+   380→          title: spec2.title,
+   381→          description: spec2.description,
+   382→          priority: spec2.priority,
+   383→          order,
+   384→        });
+   385→      });
+   386→      pushHistory();
+   387→      applyData((d) => ({
+   388→        ...d,
+   389→        boards: [...d.boards, board],
+   390→        columns: [...d.columns, ...cols],
+   391→        tasks: [...d.tasks, ...tasks],
+   392→        activeBoardId: board.id,
+   393→      }));
+   394→      return board.id;
+   395→    },
+   396→
+   397→    updateBoard: (id, patch) => {
+   398→      pushHistory();
+   399→      applyData((d) => ({
+   400→        ...d,
+   401→        boards: d.boards.map((b) => (b.id === id ? { ...b, ...patch, updatedAt: Date.now() } : b)),
+   402→      }));
+   403→    },
+   404→
+   405→    duplicateBoard: (id) => {
+   406→      const s = get();
+   407→      const src = s.data.boards.find((b) => b.id === id);
+   408→      if (!src) return;
+   409→      const copy = { ...src, id: uid("b"), name: `${src.name} (2)`, createdAt: Date.now(), updatedAt: Date.now() };
+   410→      const colMap = new Map<string, string>();
+   411→      const cols: Column[] = s.data.columns
+   412→        .filter((c) => c.boardId === id)
+   413→        .map((c) => {
+   414→          const nid = uid("c");
+   415→          colMap.set(c.id, nid);
+   416→          return { ...c, id: nid, boardId: copy.id, createdAt: Date.now() };
+   417→        });
+   418→      const tasks = s.data.tasks
+   419→        .filter((t) => t.boardId === id)
+   420→        .map((t) => {
+   421→          const c = cloneTask(t);
+   422→          c.id = uid("t");
+   423→          c.boardId = copy.id;
+   424→          c.columnId = colMap.get(t.columnId) ?? cols[0]?.id ?? "";
+   425→          return c;
+   426→        });
+   427→      pushHistory();
+   428→      applyData((d) => ({
+   429→        ...d,
+   430→        boards: [...d.boards, copy],
+   431→        columns: [...d.columns, ...cols],
+   432→        tasks: [...d.tasks, ...tasks],
+   433→        activeBoardId: copy.id,
+   434→      }));
+   435→    },
+   436→
+   437→    deleteBoard: (id) => {
+   438→      const s = get();
+   439→      const board = s.data.boards.find((b) => b.id === id);
+   440→      if (!board) return;
+   441→      const cols = s.data.columns.filter((c) => c.boardId === id);
+   442→      const tasks = s.data.tasks.filter((t) => t.boardId === id);
+   443→      const item: TrashItem = {
+   444→        id: uid("x"),
+   445→        type: "board",
+   446→        deletedAt: Date.now(),
+   447→        label: board.name,
+   448→        boardId: board.id,
+   449→        payloadBoard: board,
+   450→        payloadColumns: cols,
+   451→        payloadTasks: tasks,
+   452→      };
+   453→      pushHistory();
+   454→      applyData((d) => {
+   455→        const remaining = d.boards.filter((b) => b.id !== id);
+   456→        const nextActive =
+   457→          d.activeBoardId === id ? remaining.find((b) => !b.archived)?.id ?? null : d.activeBoardId;
+   458→        return {
+   459→          ...d,
+   460→          boards: remaining,
+   461→          columns: d.columns.filter((c) => c.boardId !== id),
+   462→          tasks: d.tasks.filter((t) => t.boardId !== id),
+   463→          trash: [...d.trash, item],
+   464→          activeBoardId: nextActive,
+   465→        };
+   466→      });
+   467→    },
+   468→
+   469→    resetBoard: (id) => {
+   470→      const s = get();
+   471→      const board = s.data.boards.find((b) => b.id === id);
+   472→      if (!board) return;
+   473→      const cols = s.data.columns.filter((c) => c.boardId === id);
+   474→      const tasks = s.data.tasks.filter((t) => t.boardId === id);
+   475→      const lang: Lang = detectBrowserLang();
+   476→      const t = (k: string) => messages[lang][k] ?? k;
+   477→      const items: TrashItem[] = [
+   478→        ...tasks.map((task) => ({
+   479→          id: uid("x"),
+   480→          type: "task" as const,
+   481→          deletedAt: Date.now(),
+   482→          label: task.title,
+   483→          boardId: id,
+   484→          columnId: task.columnId,
+   485→          payloadTask: task,
+   486→        })),
+   487→        ...cols.map((c) => ({
+   488→          id: uid("x"),
+   489→          type: "column" as const,
+   490→          deletedAt: Date.now(),
+   491→          label: c.name,
+   492→          boardId: id,
+   493→          columnId: c.id,
+   494→          payloadColumn: c,
+   495→          payloadTasks: [],
+   496→        })),
+   497→      ];
+   498→      const fresh = defaultColumnsFor(id, [t("col.todo"), t("col.inprogress"), t("col.done")]);
+   499→      pushHistory();
+   500→      applyData((d) => ({
+   501→        ...d,
+   502→        columns: [...d.columns.filter((c) => c.boardId !== id), ...fresh],
+   503→        tasks: d.tasks.filter((t2) => t2.boardId !== id),
+   504→        trash: [...d.trash, ...items],
+   505→      }));
+   506→    },
+   507→
+   508→    setActiveBoard: (id) => {
+   509→      applyData((d) => ({ ...d, activeBoardId: id }), false);
+   510→      get().setSearch("");
+   511→    },
+   512→
+   513→    moveBoardTo: (id, toIndex) => {
+   514→      pushHistory();
+   515→      applyData((d) => {
+   516→        const sorted = [...d.boards].sort((a, b) => a.order - b.order);
+   517→        const from = sorted.findIndex((b) => b.id === id);
+   518→        if (from < 0) return d;
+   519→        const clamped = Math.max(0, Math.min(toIndex, sorted.length - 1));
+   520→        if (clamped === from) return d;
+   521→        const [moved] = sorted.splice(from, 1);
+   522→        sorted.splice(clamped, 0, moved);
+   523→        const orderMap = new Map(sorted.map((b, i) => [b.id, i]));
+   524→        return { ...d, boards: d.boards.map((b) => ({ ...b, order: orderMap.get(b.id) ?? b.order })) };
+   525→      });
+   526→    },
+   527→
+   528→    archiveBoard: (id) => {
+   529→      pushHistory();
+   530→      applyData((d) => {
+   531→        const boards = d.boards.map((b) => (b.id === id ? { ...b, archived: true } : b));
+   532→        const nextActive =
+   533→          d.activeBoardId === id
+   534→            ? boards.find((b) => b.id !== id && !b.archived)?.id ?? null
+   535→            : d.activeBoardId;
+   536→        return { ...d, boards, activeBoardId: nextActive };
+   537→      });
+   538→    },
+   539→
+   540→    unarchiveBoard: (id) => {
+   541→      pushHistory();
+   542→      applyData((d) => ({
+   543→        ...d,
+   544→        boards: d.boards.map((b) => (b.id === id ? { ...b, archived: false } : b)),
+   545→      }));
+   546→    },
+   547→
+   548→    // ---------- columns ----------
+   549→    addColumn: (boardId, name) => {
+   550→      const order = get().data.columns.filter((c) => c.boardId === boardId).length;
+   551→      const col = createColumn(boardId, name.trim() || "?", order);
+   552→      pushHistory();
+   553→      applyData((d) => ({ ...d, columns: [...d.columns, col] }), true);
+   554→    },
+   555→
+   556→    updateColumn: (id, patch) => {
+   557→      pushHistory();
+   558→      applyData((d) => ({
+   559→        ...d,
+   560→        columns: d.columns.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+   561→      }));
+   562→    },
+   563→
+   564→    deleteColumn: (id, mode, targetColumnId) => {
+   565→      const s = get();
+   566→      const col = s.data.columns.find((c) => c.id === id);
+   567→      if (!col) return;
+   568→      const colTasks = s.data.tasks.filter((t) => t.columnId === id);
+   569→      pushHistory();
+   570→      applyData((d) => {
+   571→        let tasks = d.tasks;
+   572→        let trash = d.trash;
+   573→        if (mode === "move" && targetColumnId) {
+   574→          const base = tasks.filter((t) => t.columnId === targetColumnId).length;
+   575→          tasks = tasks.map((t) =>
+   576→            t.columnId === id ? { ...t, columnId: targetColumnId, order: base + t.order, updatedAt: Date.now() } : t
+   577→          );
+   578→        } else if (mode === "archive") {
+   579→          tasks = tasks.map((t) => (t.columnId === id ? { ...t, archived: true } : t));
+   580→        } else {
+   581→          trash = [
+   582→            ...trash,
+   583→            ...colTasks.map((t) => ({
+   584→              id: uid("x"),
+   585→              type: "task" as const,
+   586→              deletedAt: Date.now(),
+   587→              label: t.title,
+   588→              boardId: t.boardId,
+   589→              columnId: t.columnId,
+   590→              payloadTask: t,
+   591→            })),
+   592→          ];
+   593→          tasks = tasks.filter((t) => t.columnId !== id);
+   594→        }
+   595→        return {
+   596→          ...d,
+   597→          columns: d.columns.filter((c) => c.id !== id).map((c) => (c.boardId === col.boardId && c.order > col.order ? { ...c, order: c.order - 1 } : c)),
+   598→          tasks,
+   599→          trash,
+   600→        };
+   601→      });
+   602→    },
+   603→
+   604→    duplicateColumn: (id) => {
+   605→      const s = get();
+   606→      const col = s.data.columns.find((c) => c.id === id);
+   607→      if (!col) return;
+   608→      const copy: Column = { ...col, id: uid("c"), name: `${col.name} (2)`, createdAt: Date.now() };
+   609→      const tasks = s.data.tasks
+   610→        .filter((t) => t.columnId === id)
+   611→        .map((t) => {
+   612→          const c = cloneTask(t);
+   613→          c.id = uid("t");
+   614→          c.columnId = copy.id;
+   615→          return c;
+   616→        });
+   617→      pushHistory();
+   618→      applyData((d) => ({
+   619→        ...d,
+   620→        columns: [...d.columns.map((c) => (c.boardId === col.boardId && c.order > col.order ? { ...c, order: c.order + 1 } : c)), copy],
+   621→        tasks: [...d.tasks, ...tasks],
+   622→      }));
+   623→    },
+   624→
+   625→    moveColumnTo: (id, toIndex) => {
+   626→      pushHistory();
+   627→      applyData((d) => {
+   628→        const col = d.columns.find((c) => c.id === id);
+   629→        if (!col) return d;
+   630→        const sorted = d.columns.filter((c) => c.boardId === col.boardId).sort((a, b) => a.order - b.order);
+   631→        const from = sorted.findIndex((c) => c.id === id);
+   632→        const clamped = Math.max(0, Math.min(toIndex, sorted.length - 1));
+   633→        if (from < 0 || clamped === from) return d;
+   634→        const [moved] = sorted.splice(from, 1);
+   635→        sorted.splice(clamped, 0, moved);
+   636→        const orderMap = new Map(sorted.map((c, i) => [c.id, i]));
+   637→        return {
+   638→          ...d,
+   639→          columns: d.columns.map((c) => (orderMap.has(c.id) ? { ...c, order: orderMap.get(c.id) ?? c.order } : c)),
+   640→        };
+   641→      });
+   642→    },
+   643→
+   644→    archiveColumn: (id) => {
+   645→      pushHistory();
+   646→      applyData((d) => ({
+   647→        ...d,
+   648→        columns: d.columns.map((c) => (c.id === id ? { ...c, archived: true } : c)),
+   649→      }));
+   650→    },
+   651→
+   652→    unarchiveColumn: (id) => {
+   653→      pushHistory();
+   654→      applyData((d) => {
+   655→        const col = d.columns.find((c) => c.id === id);
+   656→        if (!col) return d;
+   657→        const order = d.columns.filter((c) => c.boardId === col.boardId && !c.archived).length;
+   658→        return {
+   659→          ...d,
+   660→          columns: d.columns.map((c) => (c.id === id ? { ...c, archived: false, order } : c)),
+   661→        };
+   662→      });
+   663→    },
+   664→
+   665→    // ---------- tasks ----------
+   666→    addTask: (input) => {
+   667→      const col = get().data.columns.find((c) => c.id === input.columnId);
+   668→      if (!col) return null;
+   669→      const task = createTask({
+   670→        boardId: col.boardId,
+   671→        columnId: col.id,
+   672→        title: input.title,
+   673→        description: input.description,
+   674→        dueDate: input.dueDate ?? null,
+   675→        priority: input.priority,
+   676→        labelIds: input.labelIds,
+   677→        estimateMinutes: input.estimateMinutes ?? null,
+   678→        order: nextOrder(get().data.tasks, col.id),
+   679→      });
+   680→      pushHistory();
+   681→      applyData((d) => ({ ...d, tasks: [...d.tasks, task] }), true);
+   682→      return task.id;
+   683→    },
+   684→
+   685→    updateTask: (id, patch) => withTask(id, (t) => ({ ...t, ...patch })),
+   686→
+   687→    deleteTask: (id) => {
+   688→      const s = get();
+   689→      const task = s.data.tasks.find((t) => t.id === id);
+   690→      if (!task) return;
+   691→      const item: TrashItem = {
+   692→        id: uid("x"),
+   693→        type: "task",
+   694→        deletedAt: Date.now(),
+   695→        label: task.title,
+   696→        boardId: task.boardId,
+   697→        columnId: task.columnId,
+   698→        payloadTask: task,
+   699→      };
+   700→      pushHistory();
+   701→      applyData((d) => ({
+   702→        ...d,
+   703→        tasks: d.tasks.filter((t) => t.id !== id),
+   704→        trash: [...d.trash, item],
+   705→      }));
+   706→    },
+   707→
+   708→    duplicateTask: (id) => {
+   709→      const s = get();
+   710→      const src = s.data.tasks.find((t) => t.id === id);
+   711→      if (!src) return;
+   712→      const copy = cloneTask(src);
+   713→      copy.id = uid("t");
+   714→      copy.title = `${src.title} (2)`;
+   715→      copy.createdAt = Date.now();
+   716→      copy.updatedAt = Date.now();
+   717→      copy.completedAt = null;
+   718→      copy.status = "open";
+   719→      copy.timer = { running: false, startedAt: null, accumulatedMs: 0 };
+   720→      copy.order = nextOrder(s.data.tasks, src.columnId);
+   721→      pushHistory();
+   722→      applyData((d) => ({ ...d, tasks: [...d.tasks, copy] }));
+   723→    },
+   724→
+   725→    archiveTask: (id) => {
+   726→      pushHistory();
+   727→      applyData((d) => ({
+   728→        ...d,
+   729→        tasks: d.tasks.map((t) => (t.id === id ? { ...t, archived: true, updatedAt: Date.now() } : t)),
+   730→      }));
+   731→    },
+   732→
+   733→    unarchiveTask: (id) => {
+   734→      pushHistory();
+   735→      applyData((d) => ({
+   736→        ...d,
+   737→        tasks: d.tasks.map((t) => (t.id === id ? { ...t, archived: false, updatedAt: Date.now() } : t)),
+   738→      }));
+   739→    },
+   740→
+   741→    moveTask: (taskId, toColumnId, toIndex) => {
+   742→      applyData((d) => {
+   743→        const task = d.tasks.find((t) => t.id === taskId);
+   744→        if (!task) return d;
+   745→        const fromColumn = task.columnId;
+   746→        if (fromColumn === toColumnId) {
+   747→          const colTasks = d.tasks
+   748→            .filter((t) => t.columnId === toColumnId)
+   749→            .sort((a, b) => a.order - b.order);
+   750→          const from = colTasks.findIndex((t) => t.id === taskId);
+   751→          const clamped = Math.max(0, Math.min(toIndex, colTasks.length - 1));
+   752→          if (from < 0 || clamped === from) return d;
+   753→          const [moved] = colTasks.splice(from, 1);
+   754→          colTasks.splice(clamped, 0, moved);
+   755→          const orderMap = new Map(colTasks.map((t, i) => [t.id, i]));
+   756→          return {
+   757→            ...d,
+   758→            tasks: d.tasks.map((t) => (orderMap.has(t.id) ? { ...t, order: orderMap.get(t.id) ?? t.order } : t)),
+   759→          };
+   760→        }
+   761→        const targetTasks = d.tasks
+   762→          .filter((t) => t.columnId === toColumnId && t.id !== taskId)
+   763→          .sort((a, b) => a.order - b.order);
+   764→        const clamped = Math.max(0, Math.min(toIndex, targetTasks.length));
+   765→        const [moved] = targetTasks.splice(clamped, 0, { ...task, columnId: toColumnId });
+   766→        const orderMap = new Map(targetTasks.map((t, i) => [t.id, i]));
+   767→        const sourceRest = d.tasks
+   768→          .filter((t) => t.columnId === fromColumn && t.id !== taskId)
+   769→          .sort((a, b) => a.order - b.order);
+   770→        const sourceOrderMap = new Map(sourceRest.map((t, i) => [t.id, i]));
+   771→        return {
+   772→          ...d,
+   773→          tasks: d.tasks.map((t) => {
+   774→            if (t.id === taskId) return { ...task, columnId: toColumnId, order: orderMap.get(taskId) ?? 0, updatedAt: Date.now() };
+   775→            if (t.columnId === toColumnId && orderMap.has(t.id)) return { ...t, order: orderMap.get(t.id) ?? t.order };
+   776→            if (t.columnId === fromColumn && sourceOrderMap.has(t.id)) return { ...t, order: sourceOrderMap.get(t.id) ?? t.order };
+   777→            return t;
+   778→          }),
+   779→        };
+   780→      });
+   781→    },
+   782→
+   783→    toggleTaskDone: (id) => {
+   784→      const s = get();
+   785→      const task = s.data.tasks.find((t) => t.id === id);
+   786→      if (!task) return;
+   787→      const becomingDone = task.status !== "done";
+   788→      pushHistory();
+   789→      applyData((d) => {
+   790→        const now = Date.now();
+   791→        let tasks = d.tasks.map((t) =>
+   792→          t.id === id
+   793→            ? {
+   794→                ...t,
+   795→                status: becomingDone ? ("done" as const) : ("open" as const),
+   796→                completedAt: becomingDone ? now : null,
+   797→                updatedAt: now,
+   798→                timer: t.timer.running && becomingDone ? { ...t.timer, running: false, startedAt: null, accumulatedMs: t.timer.accumulatedMs + (t.timer.startedAt ? now - t.timer.startedAt : 0) } : t.timer,
+   799→              }
+   800→            : t
+   801→        );
+   802→        // Recurrence: create the next occurrence when completing a recurring task.
+   803→        if (becomingDone && task.recurrence) {
+   804→          const alreadyHasNext = tasks.some(
+   805→            (t) => t.recurrenceOriginId === task.id && t.status === "open" && !t.archived
+   806→          );
+   807→          if (!alreadyHasNext) {
+   808→            const next = cloneTask(task);
+   809→            next.id = uid("t");
+   810→            next.recurrenceOriginId = task.id;
+   811→            next.status = "open";
+   812→            next.completedAt = null;
+   813→            next.createdAt = now;
+   814→            next.updatedAt = now;
+   815→            next.dueDate = nextRecurrenceDate(
+   816→              task.recurrence.freq,
+   817→              task.recurrence.interval,
+   818→              task.recurrence.unit,
+   819→              task.dueDate ?? now,
+   820→              now
+   821→            );
+   822→            next.subtasks = task.subtasks.map((st) => ({ ...st, done: false }));
+   823→            next.comments = [];
+   824→            next.spentMinutes = 0;
+   825→            next.timer = { running: false, startedAt: null, accumulatedMs: 0 };
+   826→            next.order = -1; // top of column
+   827→            const colTasks = tasks.filter((t) => t.columnId === next.columnId).map((t) => ({ ...t, order: t.order + 1 }));
+   828→            const colSet = new Set(colTasks.map((t) => t.id));
+   829→            tasks = tasks.map((t) => (colSet.has(t.id) ? colTasks.find((ct) => ct.id === t.id)! : t));
+   830→            tasks = [...tasks, next];
+   831→          }
+   832→        }
+   833→        return { ...d, tasks };
+   834→      }, true);
+   835→    },
+   836→
+   837→    toggleTaskBlocked: (id) =>
+   838→      withTask(id, (t) => ({ ...t, blocked: !t.blocked })),
+   839→
+   840→    // ---------- subtasks ----------
+   841→    addSubtask: (taskId, title) => {
+   842→      if (!title.trim()) return;
+   843→      withTask(taskId, (t) => ({ ...t, subtasks: [...t.subtasks, createSubtask(title)] }));
+   844→    },
+   845→    updateSubtask: (taskId, subId, patch) =>
+   846→      withTask(taskId, (t) => ({
+   847→        ...t,
+   848→        subtasks: t.subtasks.map((s) => (s.id === subId ? { ...s, ...patch } : s)),
+   849→      })),
+   850→    deleteSubtask: (taskId, subId) =>
+   851→      withTask(taskId, (t) => ({ ...t, subtasks: t.subtasks.filter((s) => s.id !== subId) })),
+   852→    moveSubtask: (taskId, subId, dir) =>
+   853→      withTask(taskId, (t) => {
+   854→        const idx = t.subtasks.findIndex((s) => s.id === subId);
+   855→        const to = idx + dir;
+   856→        if (idx < 0 || to < 0 || to >= t.subtasks.length) return t;
+   857→        const arr = [...t.subtasks];
+   858→        [arr[idx], arr[to]] = [arr[to], arr[idx]];
+   859→        return { ...t, subtasks: arr };
+   860→      }),
+   861→
+   862→    // ---------- comments & links ----------
+   863→    addComment: (taskId, text) => {
+   864→      if (!text.trim()) return;
+   865→      withTask(taskId, (t) => ({
+   866→        ...t,
+   867→        comments: [{ id: uid("cm"), text: text.trim(), createdAt: Date.now() }, ...t.comments],
+   868→      }));
+   869→    },
+   870→    deleteComment: (taskId, commentId) =>
+   871→      withTask(taskId, (t) => ({ ...t, comments: t.comments.filter((c) => c.id !== commentId) })),
+   872→    addLink: (taskId, url) => {
+   873→      const clean = url.trim();
+   874→      if (!clean) return;
+   875→      const withProto = /^https?:\/\//i.test(clean) ? clean : `https://${clean}`;
+   876→      withTask(taskId, (t) => ({
+   877→        ...t,
+   878→        links: [...t.links, { id: uid("k"), url: withProto, title: clean }],
+   879→      }));
+   880→    },
+   881→    deleteLink: (taskId, linkId) =>
+   882→      withTask(taskId, (t) => ({ ...t, links: t.links.filter((l) => l.id !== linkId) })),
+   883→
+   884→    // ---------- timer ----------
+   885→    startTimer: (taskId) =>
+   886→      withTask(taskId, (t) => ({ ...t, timer: { ...t.timer, running: true, startedAt: Date.now() } }), false),
+   887→    pauseTimer: (taskId) =>
+   888→      withTask(taskId, (t) => {
+   889→        const now = Date.now();
+   890→        const extra = t.timer.running && t.timer.startedAt ? now - t.timer.startedAt : 0;
+   891→        return {
+   892→          ...t,
+   893→          timer: { running: false, startedAt: null, accumulatedMs: t.timer.accumulatedMs + extra },
+   894→        };
+   895→      }, false),
+   896→    logTimer: (taskId) =>
+   897→      withTask(taskId, (t) => {
+   898→        const now = Date.now();
+   899→        const elapsed = t.timer.accumulatedMs + (t.timer.running && t.timer.startedAt ? now - t.timer.startedAt : 0);
+   900→        return {
+   901→          ...t,
+   902→          spentMinutes: t.spentMinutes + Math.round(elapsed / 60000),
+   903→          timer: { running: false, startedAt: null, accumulatedMs: 0 },
+   904→        };
+   905→      }, false),
+   906→    clearTimer: (taskId) =>
+   907→      withTask(taskId, (t) => ({ ...t, timer: { running: false, startedAt: null, accumulatedMs: 0 } }), false),
+   908→
+   909→    // ---------- labels ----------
+   910→    addLabel: (boardId, name, color) => {
+   911→      if (!name.trim()) return null;
+   912→      const label = createLabel(name, color);
+   913→      pushHistory();
+   914→      applyData((d) => ({
+   915→        ...d,
+   916→        boards: d.boards.map((b) => (b.id === boardId ? { ...b, labels: [...b.labels, label] } : b)),
+   917→      }));
+   918→      return label.id;
+   919→    },
+   920→    updateLabel: (boardId, labelId, patch) => {
+   921→      pushHistory();
+   922→      applyData((d) => ({
+   923→        ...d,
+   924→        boards: d.boards.map((b) =>
+   925→          b.id === boardId
+   926→            ? { ...b, labels: b.labels.map((l) => (l.id === labelId ? { ...l, ...patch } : l)) }
+   927→            : b
+   928→        ),
+   929→      }));
+   930→    },
+   931→    deleteLabel: (boardId, labelId) => {
+   932→      pushHistory();
+   933→      applyData((d) => ({
+   934→        ...d,
+   935→        boards: d.boards.map((b) =>
+   936→          b.id === boardId ? { ...b, labels: b.labels.filter((l) => l.id !== labelId) } : b
+   937→        ),
+   938→        tasks: d.tasks.map((t) =>
+   939→          t.boardId === boardId ? { ...t, labelIds: t.labelIds.filter((id) => id !== labelId) } : t
+   940→        ),
+   941→      }));
+   942→    },
+   943→    toggleTaskLabel: (taskId, labelId) =>
+   944→      withTask(taskId, (t) => ({
+   945→        ...t,
+   946→        labelIds: t.labelIds.includes(labelId)
+   947→          ? t.labelIds.filter((id) => id !== labelId)
+   948→          : [...t.labelIds, labelId],
+   949→      })),
+   950→
+   951→    // ---------- recurrence ----------
+   952→    setRecurrence: (taskId, recurrence) =>
+   953→      withTask(taskId, (t) => ({ ...t, recurrence })),
+   954→
+   955→    // ---------- trash ----------
+   956→    restoreFromTrash: (itemId) => {
+   957→      const s = get();
+   958→      const item = s.data.trash.find((x) => x.id === itemId);
+   959→      if (!item) return;
+   960→      pushHistory();
+   961→      applyData((d) => {
+   962→        let nd = { ...d, trash: d.trash.filter((x) => x.id !== itemId) };
+   963→        const ensureId = <T extends { id: string }>(obj: T, existing: Set<string>): T => {
+   964→          if (existing.has(obj.id)) {
+   965→            return { ...obj, id: uid(obj.id[0]) } as T;
+   966→          }
+   967→          return obj;
+   968→        };
+   969→        if (item.type === "task" && item.payloadTask) {
+   970→          let task = cloneTask(item.payloadTask);
+   971→          task.archived = false;
+   972→          const columnExists = nd.columns.some((c) => c.id === task.columnId);
+   973→          const boardExists = nd.boards.some((b) => b.id === task.boardId);
+   974→          if (!boardExists || !columnExists) {
+   975→            const fallbackBoard = nd.boards.find((b) => b.id === d.activeBoardId) ?? nd.boards[0];
+   976→            if (!fallbackBoard) return d;
+   977→            const fallbackCol = nd.columns
+   978→              .filter((c) => c.boardId === fallbackBoard.id && !c.archived)
+   979→              .sort((a, b) => a.order - b.order)[0];
+   980→            if (!fallbackCol) return d;
+   981→            task = { ...task, boardId: fallbackBoard.id, columnId: fallbackCol.id };
+   982→          }
+   983→          const ids = new Set(nd.tasks.map((t) => t.id));
+   984→          task = ensureId(task, ids);
+   985→          task.order = nextOrder(nd.tasks, task.columnId);
+   986→          nd = { ...nd, tasks: [...nd.tasks, task] };
+   987→        } else if (item.type === "column" && item.payloadColumn) {
+   988→          let col = { ...item.payloadColumn, archived: false };
+   989→          const boardExists = nd.boards.some((b) => b.id === col.boardId);
+   990→          if (!boardExists) {
+   991→            const fallback = nd.boards.find((b) => b.id === d.activeBoardId) ?? nd.boards[0];
+   992→            if (!fallback) return d;
+   993→            col = { ...col, boardId: fallback.id };
+   994→          }
+   995→          const ids = new Set(nd.columns.map((c) => c.id));
+   996→          col = ensureId(col, ids);
+   997→          col.order = nd.columns.filter((c) => c.boardId === col.boardId && !c.archived).length;
+   998→          const colIds = new Set(nd.columns.map((c) => c.id));
+   999→          colIds.add(col.id);
+  1000→          const restoredTasks = (item.payloadTasks ?? []).map((t) => {
+  1001→            const c = cloneTask(t);
+  1002→            c.archived = false;
+  1003→            c.columnId = col.id;
+  1004→            return c;
+  1005→          });
+  1006→          nd = { ...nd, columns: [...nd.columns, col], tasks: [...nd.tasks, ...restoredTasks] };
+  1007→        } else if (item.type === "board" && item.payloadBoard) {
+  1008→          let board = { ...item.payloadBoard, archived: false };
+  1009→          const boardIds = new Set(nd.boards.map((b) => b.id));
+  1010→          board = ensureId(board, boardIds);
+  1011→          const colIds = new Set(nd.columns.map((c) => c.id));
+  1012→          const originalCols = item.payloadColumns ?? [];
+  1013→          const colMap = new Map<string, string>();
+  1014→          const cols = originalCols.map((c) => {
+  1015→            const fixed = ensureId({ ...c }, colIds);
+  1016→            colMap.set(c.id, fixed.id);
+  1017→            return fixed;
+  1018→          });
+  1019→          const taskIds = new Set(nd.tasks.map((t) => t.id));
+  1020→          const tasks = (item.payloadTasks ?? []).map((t) => {
+  1021→            const c = cloneTask(t);
+  1022→            c.boardId = board.id;
+  1023→            c.columnId = colMap.get(t.columnId) ?? cols[0]?.id ?? "";
+  1024→            return ensureId(c, taskIds);
+  1025→          });
+  1026→          nd = {
+  1027→            ...nd,
+  1028→            boards: [...nd.boards, board],
+  1029→            columns: [...nd.columns, ...cols],
+  1030→            tasks: [...nd.tasks, ...tasks],
+  1031→            activeBoardId: board.id,
+  1032→          };
+  1033→        }
+  1034→        return nd;
+  1035→      });
+  1036→    },
+  1037→
+  1038→    purgeTrashItem: (itemId) => {
+  1039→      pushHistory();
+  1040→      applyData((d) => ({ ...d, trash: d.trash.filter((x) => x.id !== itemId) }));
+  1041→    },
+  1042→
+  1043→    emptyTrash: () => {
+  1044→      pushHistory();
+  1045→      applyData((d) => ({ ...d, trash: [] }));
+  1046→    },
+  1047→
+  1048→    // ---------- history ----------
+  1049→    undo: () => {
+  1050→      const s = get();
+  1051→      if (s.past.length === 0) return;
+  1052→      const prev = s.past[s.past.length - 1];
+  1053→      const current = snapshotOf(s.data);
+  1054→      set({
+  1055→        data: { ...s.data, ...prev },
+  1056→        past: s.past.slice(0, -1),
+  1057→        future: [current, ...s.future.slice(0, MAX_HISTORY - 1)],
+  1058→      });
+  1059→      saveData(get().data, true);
+  1060→    },
+  1061→    redo: () => {
+  1062→      const s = get();
+  1063→      if (s.future.length === 0) return;
+  1064→      const next = s.future[0];
+  1065→      const current = snapshotOf(s.data);
+  1066→      set({
+  1067→        data: { ...s.data, ...next },
+  1068→        past: [...s.past.slice(-MAX_HISTORY + 1), current],
+  1069→        future: s.future.slice(1),
+  1070→      });
+  1071→      saveData(get().data, true);
+  1072→    },
+  1073→    beginBatch: () => {
+  1074→      set({ _batching: true, _batchSnapshot: snapshotOf(get().data) });
+  1075→    },
+  1076→    commitBatch: () => {
+  1077→      const s = get();
+  1078→      if (s._batchSnapshot) {
+  1079→        set({
+  1080→          past: [...s.past.slice(-MAX_HISTORY + 1), s._batchSnapshot],
+  1081→          future: [],
+  1082→          _batching: false,
+  1083→          _batchSnapshot: null,
+  1084→        });
+  1085→      } else {
+  1086→        set({ _batching: false, _batchSnapshot: null });
+  1087→      }
+  1088→      saveData(get().data, true);
+  1089→    },
+  1090→    cancelBatch: () => {
+  1091→      const s = get();
+  1092→      if (s._batchSnapshot) {
+  1093→        set({ data: { ...s.data, ...s._batchSnapshot }, _batching: false, _batchSnapshot: null });
+  1094→      } else {
+  1095→        set({ _batching: false, _batchSnapshot: null });
+  1096→      }
+  1097→    },
+  1098→
+  1099→    // ---------- import ----------
+  1100→    importBoards: (payload, mode) => {
+  1101→      const summary: ImportSummary = { added: 0, replaced: 0, skipped: 0 };
+  1102→      pushHistory();
+  1103→      applyData((d) => {
+  1104→        let nd = { ...d };
+  1105→        for (const src of payload.boards) {
+  1106→          const existing = nd.boards.find((b) => b.id === src.id);
+  1107→          if (existing && mode === "replace") {
+  1108→            const cols = payload.columns.filter((c) => c.boardId === src.id);
+  1109→            const colIds = new Set(cols.map((c) => c.id));
+  1110→            const tasks = payload.tasks.filter((t) => t.boardId === src.id && colIds.has(t.columnId));
+  1111→            nd = {
+  1112→              ...nd,
+  1113→              boards: nd.boards.map((b) => (b.id === src.id ? { ...src, updatedAt: Date.now() } : b)),
+  1114→              columns: [...nd.columns.filter((c) => c.boardId !== src.id), ...cols],
+  1115→              tasks: [...nd.tasks.filter((t) => t.boardId !== src.id || !colIds.has(t.columnId)), ...tasks],
+  1116→            };
+  1117→            summary.replaced += 1;
+  1118→          } else if (existing && mode === "copy") {
+  1119→            // Full copy with fresh ids.
+  1120→            const boardIdMap = new Map<string, string>();
+  1121→            const nb: Board = { ...src, id: uid("b"), name: `${src.name} (2)`, createdAt: Date.now(), updatedAt: Date.now() };
+  1122→            boardIdMap.set(src.id, nb.id);
+  1123→            const labelMap = new Map<string, string>();
+  1124→            const labels: Label[] = (src.labels ?? []).map((l) => {
+  1125→              const nid = uid("l");
+  1126→              labelMap.set(l.id, nid);
+  1127→              return { ...l, id: nid };
+  1128→            });
+  1129→            nb.labels = labels;
+  1130→            const colMap = new Map<string, string>();
+  1131→            const cols: Column[] = payload.columns
+  1132→              .filter((c) => c.boardId === src.id)
+  1133→              .map((c) => {
+  1134→                const nid = uid("c");
+  1135→                colMap.set(c.id, nid);
+  1136→                return { ...c, id: nid, boardId: nb.id, createdAt: Date.now() };
+  1137→              });
+  1138→            const tasks: Task[] = payload.tasks
+  1139→              .filter((t) => t.boardId === src.id && colMap.has(t.columnId))
+  1140→              .map((t) => {
+  1141→                const c = cloneTask(t);
+  1142→                c.id = uid("t");
+  1143→                c.boardId = nb.id;
+  1144→                c.columnId = colMap.get(t.columnId) ?? cols[0]?.id ?? "";
+  1145→                c.labelIds = t.labelIds.map((lid) => labelMap.get(lid) ?? lid).filter((lid) => labels.some((l) => l.id === lid));
+  1146→                return c;
+  1147→              });
+  1148→            nd = {
+  1149→              ...nd,
+  1150→              boards: [...nd.boards, nb],
+  1151→              columns: [...nd.columns, ...cols],
+  1152→              tasks: [...nd.tasks, ...tasks],
+  1153→              activeBoardId: nb.id,
+  1154→            };
+  1155→            summary.added += 1;
+  1156→          } else {
+  1157→            const cols = payload.columns.filter((c) => c.boardId === src.id);
+  1158→            const colIds = new Set(cols.map((c) => c.id));
+  1159→            const tasks = payload.tasks.filter((t) => t.boardId === src.id && colIds.has(t.columnId));
+  1160→            nd = {
+  1161→              ...nd,
+  1162→              boards: [...nd.boards, { ...src, order: nd.boards.length }],
+  1163→              columns: [...nd.columns, ...cols],
+  1164→              tasks: [...nd.tasks, ...tasks],
+  1165→              activeBoardId: src.id,
+  1166→            };
+  1167→            summary.added += 1;
+  1168→          }
+  1169→        }
+  1170→        return nd;
+  1171→      });
+  1172→      return summary;
+  1173→    },
+  1174→
+  1175→    replaceAllData: (data) => {
+  1176→      const clean = sanitizeAppData(data) ?? emptyData();
+  1177→      set({ past: [], future: [], data: clean });
+  1178→      saveData(clean, true);
+  1179→    },
+  1180→  };
+  1181→});
+  1182→
+  1183→export type { AppStore };
+  1184→
